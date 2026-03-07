@@ -4,17 +4,33 @@
     "runtime-version" : "49",
     "sdk" : "org.gnome.Sdk",
     "command" : "nyarchassistant",
+
+
+    /* ESTO ES LO QUE DEBES AÑADIR */
+    "env": {
+        "XCURSOR_THEME": "miku-cursor-linx",
+        "XCURSOR_PATH": "~/.icons:/run/host/share/icons:/run/host/user-share/icons"
+    },
+
     "finish-args" : [
-        "--share=network",
-        "--share=ipc",
-        "--socket=fallback-x11",
-        "--device=dri",
-        "--socket=wayland",
-        "--talk-name=org.freedesktop.Flatpak",
-        "--filesystem=home",
-        "--socket=pulseaudio",
-        "--talk-name=org.gnome.Shell.Screencast"
-    ],
+    "--share=network",
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--device=dri",
+    /*"--socket=wayland",*/
+    "--talk-name=org.freedesktop.Flatpak",
+    "--filesystem=home",
+    "--socket=pulseaudio",
+    "--talk-name=org.gnome.Shell.Screencast",
+    "--socket=x11",            /* Asegúrate de que x11 esté presente */
+    "--nosocket=wayland",      /* ESTA LÍNEA ES CLAVE: Desactiva Wayland nativo */
+    "--talk-name=org.gnome.Shell.Screencast",
+    "--filesystem=/run/host/share/icons:ro",
+    "--filesystem=~/.icons:ro"
+
+],
+
+
 
     "cleanup" : [
         "/include",

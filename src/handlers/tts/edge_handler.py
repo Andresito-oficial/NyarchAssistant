@@ -1,5 +1,5 @@
 import threading
-import asyncio 
+import asyncio
 from pydub import AudioSegment
 
 from .tts import TTSHandler
@@ -17,6 +17,14 @@ class EdgeTTSHandler(TTSHandler):
         elif len(voices) > 0:
             self.voices = self.get_setting("voices")
 
+    @staticmethod
+    def get_extra_requirements() -> list:
+        return ["edge_tts"]
+
+    def install(self):
+        super().install()
+        threading.Thread(target=self.get_voices).start() 
+       
     def get_extra_settings(self) -> list:
         return [ 
             {   
@@ -47,6 +55,8 @@ class EdgeTTSHandler(TTSHandler):
         AudioSegment.from_mp3(mp3).export(file, format="wav")
 
     def get_voices(self) -> tuple:
+        if not self.is_installed():
+            return self.voices
         import edge_tts
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -59,5 +69,23 @@ class EdgeTTSHandler(TTSHandler):
                 result += ((voice["ShortName"], voice["ShortName"]),)
             self.voices = result
             self.set_setting("voices", self.voices)
+            self.settings_update()
         _ = get_voices()
         return self.voices
+
+    def streaming_enabled(self) -> bool:
+        return True
+
+    def get_stream_format_args(self) -> list:
+        return ["-f", "mp3"]
+
+    def get_audio_stream(self, message):
+        import edge_tts
+        communicate = edge_tts.Communicate(
+            message,
+            self.get_setting("voice"),
+            pitch="+{}Hz".format(round(self.get_setting("pitch")))
+        )
+        for chunk in communicate.stream_sync():
+            if chunk["type"] == "audio":
+                yield chunk["data"]

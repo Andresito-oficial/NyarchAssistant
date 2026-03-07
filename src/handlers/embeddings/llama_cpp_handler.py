@@ -1,7 +1,8 @@
-from ...handlers.llm import OpenAIHandler
-from ...handlers.extra_settings import ExtraSettings
-from ...utility.system import can_escape_sandbox, is_flatpak, get_spawn_command
+from ...handlers.embeddings import EmbeddingHandler
+from ...handlers import ExtraSettings
 from ...handlers import ErrorSeverity
+from ...utility.system import can_escape_sandbox, is_flatpak, get_spawn_command
+from ...ui.model_library import ModelLibraryWindow, LibraryModel
 import subprocess
 import os
 import threading
@@ -11,16 +12,17 @@ import json
 import shutil
 import atexit
 from gi.repository import Gtk, Adw, GLib, Gdk
-from ...ui.model_library import ModelLibraryWindow, LibraryModel
 import requests
+import numpy as np
 
-class LlamaCPPHandler(OpenAIHandler):
-    key = "llamacpp"
+class LlamaCPPEmbeddingHandler(EmbeddingHandler):
+    key = "llamacppembedding"
 
     def get_cache_path(self):
         cache_dir = self.path
-        return os.path.join(cache_dir, "llamacpp_models.json")
+        return os.path.join(cache_dir, "llamacpp_embedding_models.json")
 
+    # Todo add a model library
     def update_library_cache(self):
         url = "https://raw.githubusercontent.com/FrancescoCaracciolo/llm-library-scraper/refs/heads/main/lmstudio/model_list.json"
         try:
@@ -48,10 +50,8 @@ class LlamaCPPHandler(OpenAIHandler):
         atexit.register(self._atexit_handler)
         self.port = None
         self.loaded_model = None
-        self.loaded_mmproj = None
         self.models = self.get_custom_model_list()
         self.loaded_on = self.get_setting("gpu_acceleration", False, False)
-        self.set_setting("api", "no")
         self.downloading = {}
         
         self.library_data = []
@@ -83,27 +83,8 @@ class LlamaCPPHandler(OpenAIHandler):
             for file in files:
                 if file.endswith('.gguf'):
                     file_name = file.rstrip('.gguf')
-                    if "mmproj" in file_name:
-                        continue
                     relative_path = os.path.relpath(os.path.join(root, file), self.model_folder)
                     file_list += ((file_name, relative_path), )
-        if update:
-            self.settings_update()
-        return file_list
-    
-    def get_mmproj_list(self, update=False):
-        """Get mmproj files in the model folder for vision support
-
-        Returns:
-            list: list of mmproj files
-        """
-        file_list = tuple()
-        for root, _, files in os.walk(self.model_folder):
-            for file in files:
-                if 'mmproj' in file.lower() and file.endswith('.gguf'):
-                    file_name = file.rstrip('.gguf')
-                    relative_path = os.path.relpath(os.path.join(root, file), self.model_folder)
-                    file_list+=((file_name, relative_path),)
         if update:
             self.settings_update()
         return file_list
@@ -116,25 +97,18 @@ class LlamaCPPHandler(OpenAIHandler):
 
     def get_extra_settings(self) -> list:
         custom_model_list = self.get_custom_model_list()
-        mmproj_list = self.get_mmproj_list()
         settings =  [
                 ExtraSettings.ComboSetting("model", "Model", "Model to use", self.get_custom_model_list(), 
                 custom_model_list[0][1] if len(custom_model_list) > 0 else "", 
                 refresh=lambda button: self.get_custom_model_list(True),
-                folder=self.model_folder),
-                ExtraSettings.ToggleSetting("enable_mmproj", "Enable Vision (MMProj)", "Enable vision support using mmproj file", False, update_settings=True),
+                folder=self.model_folder)
             ]
-        settings += [ExtraSettings.ComboSetting("mmproj", "MMProj (Vision)", "Multimodal projection file for vision support", 
-                mmproj_list,
-                mmproj_list[0][1] if len(mmproj_list) > 0 else "",
-                refresh=lambda button: self.get_mmproj_list(True),
-                folder=self.model_folder)]
 
-        settings.extend(
-            [
-                ExtraSettings.ButtonSetting("library", "Model Library", "Open the model library", self.open_model_library, label="Model Library")
-            ]
-        )
+        #settings.extend(
+        #    [
+        #        ExtraSettings.ButtonSetting("library", "Model Library", "Open the model library", self.open_model_library, label="Model Library")
+        #    ]
+        #)
         if not self.is_gpu_installed():
             settings.append(
                 ExtraSettings.ButtonSetting("install", "Install LlamaCPP (Hardware Acceleration)", "Build llama.cpp with hardware acceleration", self.show_install_dialog, label="Install")
@@ -150,11 +124,6 @@ class LlamaCPPHandler(OpenAIHandler):
             settings.append(
                 ExtraSettings.ButtonSetting("reinstall", "Reinstall", "Rebuild llama.cpp", self.show_install_dialog, label="Reinstall")
             )
-        extra_settings = self.build_extra_settings("LlamaCPP", False, True, False, True, False, None, None, False, False, True)
-        extra_settings.extend([
-            ExtraSettings.SpinSetting("ctx", "Context Size", "Context size to use, 0 = load from model", default=0, min=0, max=1200000, page=1024, step=512),
-        ])
-        settings.extend(extra_settings)
         return settings
 
     # Model Loading
@@ -163,16 +132,12 @@ class LlamaCPPHandler(OpenAIHandler):
             s.bind(('', 0))
             return s.getsockname()[1]
 
-    def load_model(self, model):
-        model = self.get_setting("model")
-        ctx = self.get_setting("ctx", 2048, 0)
-        enable_mmproj = self.get_setting("enable_mmproj", False, False)
-        mmproj = self.get_setting("mmproj", False, None) if enable_mmproj else ""
-        if mmproj is None and len(self.get_mmproj_list()) > 0:
-            mmproj = self.get_mmproj_list()[0][1]
-        if self.loaded_model == model and self.loaded_on == self.get_setting("gpu_acceleration", False, False) and self.loaded_ctx == ctx and self.loaded_mmproj == mmproj:
+    def load_model(self, model=None):
+        if model is None:
+            model = self.get_setting("model")
+        if self.loaded_model == model and self.loaded_on == self.get_setting("gpu_acceleration", False, False):
             return True
-        path = os.path.join(self.model_folder, self.get_setting("model"))
+        path = os.path.join(self.model_folder, model)
         if not path or not os.path.exists(path):
              return False
         
@@ -190,28 +155,38 @@ class LlamaCPPHandler(OpenAIHandler):
             cmd_path = self.llama_server_path
         else:
             cmd_path = "llama-server"
-        cmd = [cmd_path, "--model", path, "--port", str(self.port), "--host", "127.0.0.1", "-c", str(ctx), "--reasoning-format", "none"]
-        
-        # Add mmproj for vision support if enabled and configured
-        if self.get_setting("enable_mmproj") and mmproj:
-            mmproj_path = os.path.join(self.model_folder, mmproj)
-            if os.path.exists(mmproj_path):
-                cmd.extend(["--mmproj", mmproj_path])
+        cmd = [cmd_path, "--model", path, "--port", str(self.port), "--host", "127.0.0.1", "--embeddings" ]
         # Use flatpak-spawn when running built llama.cpp in Flatpak
         if (is_flatpak() and self.is_gpu_installed() and self.get_setting("gpu_acceleration", False, False)) or use_system_server:
             cmd = get_spawn_command() + cmd
         self.server_process = subprocess.Popen(cmd)
         self.loaded_model = model
         self.loaded_on = self.get_setting("gpu_acceleration", False, False)
-        self.loaded_ctx = ctx
-        self.loaded_mmproj = mmproj
         # Wait for server to potentially start
         url = f"http://localhost:{self.port}/v1/models"
         start_time = time.time()
         while time.time() - start_time < 60: # 60 seconds timeout
             try:
                 if requests.get(url).status_code == 200:
-                    return True
+                    # Verify embeddings work with a test request
+                    try:
+                        test_url = f"http://localhost:{self.port}/v1/embeddings"
+                        test_response = requests.post(
+                            test_url,
+                            headers={"Content-Type": "application/json"},
+                            json={"input": "test", "model": model},
+                            timeout=30
+                        )
+                        if test_response.status_code == 200:
+                            return True
+                        else:
+                            print(f"Model loaded but embeddings test failed: {test_response.status_code} - {test_response.text[:200]}")
+                            self.kill_server()
+                            raise Exception(f"Model {model} does not support embeddings. Please use a model that supports embeddings (e.g., nomic-embed-text, bge models, or other embedding-specific models).")
+                    except requests.exceptions.RequestException as e:
+                        print(f"Could not verify embedding support: {e}")
+                        # Continue anyway, will fail later if embeddings don't work
+                        return True
             except:
                 pass
             time.sleep(0.5) 
@@ -705,11 +680,105 @@ class LlamaCPPHandler(OpenAIHandler):
         clipboard = Gdk.Display.get_default().get_clipboard()
         clipboard.set(text)
 
-    # Override get_setting and set_setting to avoid reloading the model
-    def get_setting(self, key: str, search_default = True, return_value = None):
-        if key == "endpoint":
-            return f"http://localhost:{self.port}/v1"
-        return super().get_setting(key, search_default, return_value)
+    # Embedding methods
+    def truncate_text(self, text: str, max_tokens: int = 256) -> str:
+        """Truncate text to approximately max_tokens to avoid context length issues
+        
+        The llama-server has a default batch size of 512 tokens, so we use 256
+        as a safe limit to account for tokenization variations.
+        """
+        # Conservative estimate: 1 token ≈ 3 characters on average
+        # Using 256 tokens max to stay well under the 512 batch size limit
+        max_chars = max_tokens * 3
+        if len(text) > max_chars:
+            truncated = text[:max_chars]
+            # Try to cut at a word boundary
+            last_space = truncated.rfind(' ')
+            if last_space > max_chars * 0.8:  # Only cut at word if we're not losing too much
+                truncated = truncated[:last_space]
+            return truncated
+        return text
 
-    def set_setting(self, key: str, value):
-        return super().set_setting(key, value)
+    def get_embedding(self, text: list[str]) -> np.ndarray:
+        """Get embeddings for a list of texts using llama-server's embedding endpoint"""
+        # Ensure model is loaded and server is running
+        if self.loaded_model is None or self.server_process is None:
+            if not self.load_model():
+                raise Exception("Failed to load model")
+        
+        # Call the embeddings endpoint
+        url = f"http://localhost:{self.port}/v1/embeddings"
+        headers = {"Content-Type": "application/json"}
+        
+        # Handle both single text and list of texts
+        if isinstance(text, str):
+            text = [text]
+        
+        # Truncate texts to avoid context length issues (500 error)
+        truncated_texts = [self.truncate_text(t) for t in text]
+        
+        # Try batch request first (more efficient)
+        try:
+            payload = {
+                "input": truncated_texts,
+                "model": self.loaded_model
+            }
+            response = requests.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                data = response.json()
+                
+                if "data" in data and len(data["data"]) > 0:
+                    # Sort by index to maintain order
+                    sorted_data = sorted(data["data"], key=lambda x: x.get("index", 0))
+                    embeddings = [item["embedding"] for item in sorted_data]
+                    return np.array(embeddings)
+            else:
+                print(f"Batch embedding failed with status {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"Batch embedding failed, falling back to individual requests: {e}")
+        
+        # Fallback: Process individually with retry logic and pacing
+        embeddings = []
+        for i, t in enumerate(truncated_texts):
+            payload = {
+                "input": t,
+                "model": self.loaded_model
+            }
+            
+            # Retry logic for individual requests
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    response = requests.post(url, headers=headers, json=payload)
+                    if response.status_code != 200:
+                        error_text = response.text[:500] if response.text else "No error details"
+                        print(f"Embedding request failed with status {response.status_code}: {error_text}")
+                        raise Exception(f"HTTP {response.status_code}: {error_text}")
+                    
+                    data = response.json()
+                    
+                    if "data" in data and len(data["data"]) > 0:
+                        embeddings.append(data["data"][0]["embedding"])
+                        break
+                    else:
+                        raise Exception(f"Invalid response format: {data}")
+                except Exception as e:
+                    print(f"Error getting embedding for text {i+1}/{len(text)} (attempt {attempt + 1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5 * (attempt + 1))  # Exponential backoff: 0.5s, 1s, 1.5s, 2s, 2.5s
+                    else:
+                        raise
+            
+            # Small delay between requests to avoid overwhelming the server
+            if i < len(text) - 1:
+                time.sleep(0.1)
+        
+        return np.array(embeddings)
+    
+    def get_embedding_size(self) -> int:
+        """Get the embedding dimension for the loaded model"""
+        if self.dim is None:
+            # Get embedding size by making a test request
+            test_embedding = self.get_embedding(["test"])
+            self.dim = test_embedding.shape[1]
+        return self.dim
